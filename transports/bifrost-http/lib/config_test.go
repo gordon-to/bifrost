@@ -27146,3 +27146,30 @@ func TestAgentGrantsFromConfigFile_NewKeyUnknownAgent(t *testing.T) {
 		assert.Empty(t, vk.AgentGrants)
 	}
 }
+
+// TestGetMaxRequestTimeout_ConcurrentWithConfigSave reads the x-bf-request-timeout cap while a
+// config save copies a new client config in under Mu, the way the config handler and reload do.
+// Run with -race: an unlocked read races the struct copy.
+func TestGetMaxRequestTimeout_ConcurrentWithConfigSave(t *testing.T) {
+	cfg := &Config{ClientConfig: &configstore.ClientConfig{MaxRequestTimeoutInSeconds: 900}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			updated := configstore.ClientConfig{MaxRequestTimeoutInSeconds: 600 + i%2*300}
+			cfg.Mu.Lock()
+			*cfg.ClientConfig = updated
+			cfg.Mu.Unlock()
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		if got := cfg.GetMaxRequestTimeout(); got != 600*time.Second && got != 900*time.Second {
+			t.Fatalf("cap = %v, want 600s or 900s", got)
+		}
+	}
+	<-done
+
+	if got := (&Config{}).GetMaxRequestTimeout(); got != 0 {
+		t.Fatalf("cap without a client config = %v, want 0 (header ignored)", got)
+	}
+}

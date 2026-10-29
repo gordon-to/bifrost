@@ -588,6 +588,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_anthropic_workload_identity_column"}, run: migrationAddAnthropicWorkloadIdentityColumn},
 	{IDs: []string{"add_mcp_per_user_discoveries"}, run: migrationAddMCPPerUserDiscoveries},
 	{IDs: []string{"add_mcp_client_pending_verification_column"}, run: migrationAddMCPClientPendingVerificationColumn},
+	{IDs: []string{"add_max_request_timeout_in_seconds_column"}, run: migrationAddMaxRequestTimeoutInSecondsColumn},
 }
 
 // warpLogEmbeddingColumns are the semantic-search configuration columns added
@@ -17053,6 +17054,36 @@ func migrationAddMCPClientPendingVerificationColumn(ctx context.Context, db *gor
 				return fmt.Errorf("drop pending_verification column from config_mcp_clients: %w", err)
 			}
 			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddMaxRequestTimeoutInSecondsColumn adds max_request_timeout_in_seconds to config_client.
+// No backfill: 0 keeps the x-bf-request-timeout header ignored, so upgrading changes nothing until
+// an operator sets a cap.
+func migrationAddMaxRequestTimeoutInSecondsColumn(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	migrationName := "add_max_request_timeout_in_seconds_column"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db.WithContext(ctx), migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if err := setMigrationLockTimeout(tx); err != nil {
+				return err
+			}
+			if err := addColumnIfNotExists(tx, logger, &tables.TableClientConfig{}, "max_request_timeout_in_seconds"); err != nil {
+				return fmt.Errorf("failed to add max_request_timeout_in_seconds column: %w", err)
+			}
+			return nil
+		},
+		// Dropping the column would delete the cap an operator configured.
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: dropping the column would delete the configured cap on x-bf-request-timeout; it is additive and older binaries ignore it", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {
